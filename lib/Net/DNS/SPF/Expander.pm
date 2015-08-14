@@ -1,5 +1,5 @@
 package Net::DNS::SPF::Expander;
-$Net::DNS::SPF::Expander::VERSION = '0.016';
+$Net::DNS::SPF::Expander::VERSION = '0.017';
 use Moose;
 use IO::All -utf8;
 use Net::DNS::ZoneFile;
@@ -117,7 +117,8 @@ onto the end of the original filename.
 has 'output_file' => (
     is         => 'ro',
     isa        => 'Str',
-    lazy_build => 1,
+    lazy       => 1,
+    builder    => '_build_output_file',
 );
 
 =head2 backup_file
@@ -130,8 +131,9 @@ onto the end of the original filename.
 has 'backup_file' => (
     is         => 'ro',
     isa        => IO_All,
-    lazy_build => 1,
+    lazy       => 1,
     coerce     => 1,
+    builder    => '_build_backup_file',
 );
 
 =head2 nameservers
@@ -154,7 +156,8 @@ The L<Net::DNS::Zonefile> object created from the input_file.
 has 'parsed_file' => (
     is         => 'ro',
     isa        => 'Net::DNS::ZoneFile',
-    lazy_build => 1,
+    lazy       => 1,
+    builder    => '_build_parsed_file',
 );
 
 =head2 to_expand
@@ -242,7 +245,8 @@ or you can set it if you like.
 has 'origin' => (
     is         => 'ro',
     isa        => 'Str',
-    lazy_build => 1,
+    lazy       => 1,
+    builder    => '_build_origin',
 );
 
 =head1 PRIVATE ATTRIBUTES
@@ -257,7 +261,8 @@ has '_input_file' => (
     is         => 'ro',
     isa        => IO_All,
     coerce     => 1,
-    lazy_build => 1,
+    lazy       => 1,
+    builder    => '_build__input_file',
 );
 
 =head2 _resource_records
@@ -270,7 +275,8 @@ found in the entire parsed_file.
 has '_resource_records' => (
     is         => 'ro',
     isa        => 'Maybe[ArrayRef[Net::DNS::RR]]',
-    lazy_build => 1,
+    lazy       => 1,
+    builder    => '_build__resource_records',
 );
 
 =head2 _spf_records
@@ -283,7 +289,8 @@ records found in the entire parsed_file.
 has '_spf_records' => (
     is         => 'ro',
     isa        => 'Maybe[ArrayRef[Net::DNS::RR]]',
-    lazy_build => 1,
+    lazy       => 1,
+    builder    => '_build__spf_records',
 );
 
 =head2 _resolver
@@ -297,7 +304,8 @@ variables if you want to change the nameserver it uses.
 has '_resolver' => (
     is         => 'ro',
     isa        => 'Net::DNS::Resolver',
-    lazy_build => 1,
+    lazy       => 1,
+    builder    => '_build__resolver',
 );
 
 =head2 _expansions
@@ -331,7 +339,8 @@ They are alpha sorted in the final results for predictability in tests.
 has '_expansions' => (
     is         => 'ro',
     isa        => 'HashRef',
-    lazy_build => 1,
+    lazy       => 1,
+    builder    => '_build__expansions',
 );
 
 =head2 _lengths_of_expansions
@@ -346,7 +355,8 @@ pieces.
 has '_lengths_of_expansions' => (
     is         => 'ro',
     isa        => 'HashRef',
-    lazy_build => 1,
+    lazy       => 1,
+    builder    => '_build__lengths_of_expansions',
 );
 
 =head2 _record_class
@@ -726,18 +736,16 @@ SPF record.
 sub _new_records_from_arrayref {
     my ( $self, $domain, $expansions ) = @_;
 
+    my $txtdata = join(' ', @$expansions);
 
     my @new_records = ();
-    for my $type ( 'TXT', 'SPF' ) {
-        push @new_records,
-            new Net::DNS::RR(
-                type    => $type,
-                name    => $domain,
-                class   => $self->_record_class,
-                ttl     => $self->ttl,
-                txtdata => join( ' ', @$expansions ),
-            );
-    }
+    push @new_records, new Net::DNS::RR(
+        type    => 'TXT',
+        name    => $domain,
+        class   => $self->_record_class,
+        ttl     => $self->ttl,
+        txtdata => $txtdata,
+    );
     return \@new_records;
 }
 
@@ -804,7 +812,7 @@ sub _new_records_from_partition {
         push @partitions, [ split( ' ', $substring ) ];
         $partition_offset = $split_point;
     }
-	return \@partitions if $partitions_only;
+    return \@partitions if $partitions_only;
 
     my @return = ();
 
@@ -829,17 +837,14 @@ sub _get_single_record_string {
     my @record_strings = ();
 
     my @sorted_record_set = map { $_ }
-        # We sort first by the string, and then by the type,
-        # so that TXT goes first, before SPF.
-        sort  { $b->type cmp $a->type }
         sort  { $a->string cmp $b->string }
     @$record_set;
 
     for my $record (@sorted_record_set) {
         $record->name($domain);
         $record->txtdata( 'v=spf1 ' . $record->txtdata . ' ~all' );
-        my $string = $self->_normalize_record_name( $record->string ) . "\n";
-        $string =~ s/\t/    /g;
+
+        my $string = $self->_normalize_record_name( $record->string );
         push @record_strings, $string;
     }
     return \@record_strings;
@@ -872,6 +877,14 @@ sub _normalize_record_name {
         $name = $original_name;
     }
     $record =~ s/\Q$original_name\E/$name/g;
+    $record =~ s/\n//g;
+    $record =~ s/(\(|\))//g;
+    $record =~ s/\t\s/\t/g;
+    $record =~ s/\s\t/\t/g;
+    $record =~ s/\t\t/\t/g;
+    $record =~ s/\t/    /g;
+    $record =~ s/\s/ /g;
+    $record = $record."\n";
     return $record;
 }
 
@@ -893,27 +906,24 @@ sub _get_multiple_record_strings {
 
     my @containing_records = ();
 
-    for my $type ( 'TXT', 'SPF' ) {
-        my $i = $start_index // 1;
-        for my $value (@$values) {
-            push @containing_records,
-                new Net::DNS::RR(
-                    type    => $type,
-                    name    => "_spf$i.$origin",
-                    class   => $self->_record_class,
-                    ttl     => $self->ttl,
-                    txtdata => 'v=spf1 ' . $value,
-                );
-            $i++;
-        }
+    my $i = $start_index // 1;
+    for my $value (@$values) {
+        push @containing_records,
+            new Net::DNS::RR(
+                type    => 'TXT',
+                name    => "_spf$i.$origin",
+                class   => $self->_record_class,
+                ttl     => $self->ttl,
+                txtdata => 'v=spf1 ' . $value,
+            );
+        $i++;
     }
 
-    @record_strings = map { my $string = $self->_normalize_record_name( $_->string ) . "\n"; $string =~ s/\t/    /g; $string; }
-        # We sort first by the string, and then by the type,
-        # so that TXT goes first, before SPF.
-        sort  { $b->type cmp $a->type }
-        sort  { $a->string cmp $b->string }
-    @containing_records;
+    @record_strings = map {
+        $self->_normalize_record_name($_->string)
+    } sort {
+        $a->string cmp $b->string
+    } @containing_records;
 
     return \@record_strings;
 }
@@ -964,48 +974,43 @@ sub _get_master_record_strings {
                 $index++;
         }
 
-        for my $type ( 'TXT', 'SPF' ) {
-            for my $domain (@$domains) {
+        for my $domain (@$domains) {
 
-                push @containing_records,
-                new Net::DNS::RR(
-                    type    => $type,
-                    name    => $domain,
-                    class   => $self->_record_class,
-                    ttl     => $self->ttl,
-                    txtdata => \@master_record_strings,
-                );
-            }
+            push @containing_records,
+            new Net::DNS::RR(
+                type    => 'TXT',
+                name    => $domain,
+                class   => $self->_record_class,
+                ttl     => $self->ttl,
+                txtdata => \@master_record_strings,
+            );
         }
 
     # Otherwise, proceed as normal
     } else {
 
-        for my $type ( 'TXT', 'SPF' ) {
-            for my $domain (@$domains) {
+        for my $domain (@$domains) {
 
-                push @containing_records,
-                new Net::DNS::RR(
-                    type    => $type,
-                    name    => $domain,
-                    class   => $self->_record_class,
-                    ttl     => $self->ttl,
-                    txtdata => 'v=spf1 ' . (join(
-                    ' ',
-                    ( map {"include:_spf$_.$origin"} ( 1 .. scalar(@$values) ) )
-                    )) . ' ~all',
-                );
-            }
+            push @containing_records,
+            new Net::DNS::RR(
+                type    => 'TXT',
+                name    => $domain,
+                class   => $self->_record_class,
+                ttl     => $self->ttl,
+                txtdata => 'v=spf1 ' . (join(
+                ' ',
+                ( map {"include:_spf$_.$origin"} ( 1 .. scalar(@$values) ) )
+                )) . ' ~all',
+            );
         }
 
     }
 
-    @record_strings = map { my $string = $self->_normalize_record_name( $_->string ); $string =~ s/\n//g; $string =~ s/(\(|\))//g; $string =~ s/\t/    /g;$string = $string."\n"; }
-        # We sort first by the string, and then by the type,
-        # so that TXT goes first, before SPF.
-        sort  { $b->type cmp $a->type }
-        sort  { $a->string cmp $b->string }
-    @containing_records;
+    @record_strings = map {
+        $self->_normalize_record_name($_->string)
+    } sort {
+        $a->string cmp $b->string
+    } @containing_records;
 
     return \@record_strings;
 }
@@ -1077,6 +1082,12 @@ LINE: for my $line (@original_lines) {
     my @last_segment  = @new_lines[ $spf_indices[-1] + 1 .. $#new_lines ];
     my @final_lines   = ( @first_segment, @record_strings, @last_segment );
 
+    for my $line (@final_lines) {
+        $line =~ s/\t/    /g;
+        $line =~ s/\n\s+/\n/g;
+        $line =~ s/\s+\n/\n/g;
+        $line =~ s/\n+/\n/g;
+    }
     return \@final_lines;
 }
 
@@ -1094,6 +1105,10 @@ Amiri Barksdale E<lt>amiri@campusexplorer.comE<gt>
 =head2 CONTRIBUTORS
 
 Neil Bowers E<lt>neil@bowers.comE<gt>
+
+Marc Bradshaw E<lt>marc@marcbradshaw.netE<gt>
+
+Karen Etheridge E<lt>ether@cpan.orgE<gt>
 
 Chris Weyl E<lt>cweyl@campusexplorer.comE<gt>
 
